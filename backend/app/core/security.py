@@ -9,12 +9,29 @@ from app.core.config import settings
 password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
+def _truncate(password: str) -> str:
+    """Bcrypt silently ignores bytes beyond 72 — truncate explicitly to avoid passlib version bug."""
+    encoded = password.encode("utf-8")
+    return encoded[:72].decode("utf-8", errors="ignore")
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return password_context.verify(plain_password, hashed_password)
+    try:
+        return password_context.verify(_truncate(plain_password), hashed_password)
+    except Exception:
+        # Fallback to direct bcrypt
+        import bcrypt
+        return bcrypt.checkpw(plain_password.encode("utf-8")[:72], hashed_password.encode("utf-8"))
 
 
 def hash_password(password: str) -> str:
-    return password_context.hash(password)
+    try:
+        return password_context.hash(_truncate(password))
+    except Exception:
+        # Fallback to direct bcrypt
+        import bcrypt
+        hashed = bcrypt.hashpw(password.encode("utf-8")[:72], bcrypt.gensalt())
+        return hashed.decode("utf-8")
 
 
 def create_access_token(subject: str, expires_delta: timedelta | None = None) -> str:

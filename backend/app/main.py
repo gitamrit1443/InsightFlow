@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -31,7 +31,6 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
-    default_response_class=ORJSONResponse,
     lifespan=lifespan,
 )
 
@@ -54,7 +53,7 @@ async def global_rate_limit(request: Request, call_next):
             )
         except HTTPException as exc:
             retry_after = int((exc.headers or {}).get("Retry-After", "60"))
-            return ORJSONResponse(
+            return JSONResponse(
                 status_code=429,
                 content={
                     "detail": exc.detail,

@@ -2,13 +2,10 @@ import asyncio
 import math
 import os
 import re
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
-
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 from app.core.config import settings
 
@@ -68,33 +65,67 @@ def chunk_text(text: str) -> list[str]:
 
 
 class TensorFlowEmbeddingBackend:
+    """
+    Lazy-loads TF+HuggingFace transformer for dense embeddings.
+
+    BUG FIXES:
+    - Added threading.Lock() to prevent concurrent _load() races
+    - Model availability check now properly validates cache directory has real model files
+    - TF_USE_LEGACY_KERAS set before any TF import to avoid Keras 3 conflict
+    - load_error is surfaced clearly instead of silently falling through
+    """
+
     def __init__(self) -> None:
         self._tokenizer = None
         self._model = None
         self._load_error: str | None = None
+        self._lock = threading.Lock()
+
+    def _model_cached(self) -> bool:
+        """
+        Check if the transformer model is actually cached locally.
+        Looks for config.json inside any subdirectory of the cache dir
+        (HuggingFace saves models in named subdirs like 'models--distilbert-base-uncased').
+        """
+        cache_dir = settings.nlp_model_cache_dir
+        if not cache_dir.exists():
+            return False
+        # HF cache structure: model-cache/models--<org>--<name>/snapshots/<hash>/config.json
+        config_files = list(cache_dir.rglob("config.json"))
+        return len(config_files) > 0
 
     def _load(self) -> None:
-        if self._model is not None or self._load_error:
-            return
-        try:
-            os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
-            import tensorflow as tf
-            from transformers import AutoTokenizer, TFAutoModel
+        with self._lock:
+            if self._model is not None or self._load_error:
+                return
+            if not settings.nlp_allow_model_download and not self._model_cached():
+                self._load_error = (
+                    "Transformer model is not cached locally and "
+                    "NLP_ALLOW_MODEL_DOWNLOAD=false. "
+                    "Run 'python -m app.download_models' to cache the model, "
+                    "or set NLP_ALLOW_MODEL_DOWNLOAD=true in .env."
+                )
+                return
+            try:
+                # Must set BEFORE importing tensorflow
+                os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
+                import tensorflow as tf  # noqa: F401
+                from transformers import AutoTokenizer, TFAutoModel
 
-            self._tf = tf
-            settings.nlp_model_cache_dir.mkdir(parents=True, exist_ok=True)
-            load_options = {
-                "cache_dir": str(settings.nlp_model_cache_dir),
-                "local_files_only": not settings.nlp_allow_model_download,
-            }
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                settings.nlp_transformer_model, **load_options
-            )
-            self._model = TFAutoModel.from_pretrained(
-                settings.nlp_transformer_model, **load_options
-            )
-        except Exception as exc:
-            self._load_error = str(exc)
+                settings.nlp_model_cache_dir.mkdir(parents=True, exist_ok=True)
+                load_options = {
+                    "cache_dir": str(settings.nlp_model_cache_dir),
+                    "local_files_only": not settings.nlp_allow_model_download,
+                }
+                self._tokenizer = AutoTokenizer.from_pretrained(
+                    settings.nlp_transformer_model, **load_options
+                )
+                self._model = TFAutoModel.from_pretrained(
+                    settings.nlp_transformer_model, **load_options
+                )
+                self._tf = tf
+            except Exception as exc:
+                self._load_error = f"TF model load failed: {exc}"
 
     def embed(self, texts: list[str]) -> EmbeddingResult:
         self._load()
@@ -116,7 +147,9 @@ class TensorFlowEmbeddingBackend:
                 self._tf.reduce_sum(mask, axis=1), 1e-9
             )
             normalized = self._tf.math.l2_normalize(pooled, axis=1).numpy()
-            vectors.extend(np.round(normalized, 6).tolist())
+            vectors.extend(
+                [[round(float(v), 6) for v in row] for row in normalized.tolist()]
+            )
         return EmbeddingResult(
             vectors=vectors,
             backend="tensorflow-transformer",
@@ -129,16 +162,68 @@ class NLPService:
         self.transformer = TensorFlowEmbeddingBackend()
 
     @staticmethod
+    def _tfidf_matrix(texts: list[str], max_features: int) -> list[list[float]]:
+        tokenized = [
+            [
+                token.lower()
+                for token in TOKEN_PATTERN.findall(text)
+                if token.lower() not in STOP_WORDS
+            ]
+            for text in texts
+        ]
+        if not tokenized:
+            return []
+
+        document_frequency: Counter[str] = Counter()
+        term_frequency: list[Counter[str]] = []
+        for tokens in tokenized:
+            counts = Counter(tokens)
+            term_frequency.append(counts)
+            document_frequency.update(counts.keys())
+
+        vocabulary = [
+            term
+            for term, _ in document_frequency.most_common(max_features)
+        ]
+        if not vocabulary:
+            return []
+
+        total_documents = len(texts)
+        idf = {
+            term: math.log((1 + total_documents) / (1 + document_frequency[term])) + 1
+            for term in vocabulary
+        }
+        matrix: list[list[float]] = []
+        for counts in term_frequency:
+            vector = [counts.get(term, 0) * idf[term] for term in vocabulary]
+            magnitude = math.sqrt(sum(v * v for v in vector))
+            if magnitude:
+                vector = [round(v / magnitude, 6) for v in vector]
+            matrix.append(vector)
+        return matrix
+
+    @staticmethod
+    def _cosine(first: list[float], second: list[float]) -> float:
+        if not first or not second or len(first) != len(second):
+            return 0.0
+        first_norm = math.sqrt(sum(v * v for v in first))
+        second_norm = math.sqrt(sum(v * v for v in second))
+        if not first_norm or not second_norm:
+            return 0.0
+        return sum(a * b for a, b in zip(first, second)) / (first_norm * second_norm)
+
+    @staticmethod
     def _tfidf_embeddings(texts: list[str]) -> EmbeddingResult:
-        vectorizer = TfidfVectorizer(max_features=384, stop_words="english")
-        try:
-            matrix = vectorizer.fit_transform(texts).toarray()
-        except ValueError:
-            matrix = np.eye(len(texts), dtype=float)
+        matrix = NLPService._tfidf_matrix(texts, max_features=384)
+        if not matrix:
+            matrix = [
+                [1.0 if row == col else 0.0 for col in range(len(texts))]
+                for row in range(len(texts))
+            ]
         return EmbeddingResult(
-            vectors=np.round(matrix, 6).tolist(),
+            vectors=matrix,
             backend="tfidf-fallback",
-            model="sklearn-tfidf",
+            model="python-tfidf",
         )
 
     def embed(self, texts: list[str]) -> EmbeddingResult:
@@ -148,17 +233,17 @@ class NLPService:
             try:
                 return self.transformer.embed(texts)
             except Exception:
-                pass
+                pass  # Falls through to TF-IDF
         return self._tfidf_embeddings(texts)
 
     @staticmethod
-    def _lexical_scores(question: str, chunks: list[dict[str, Any]]) -> np.ndarray:
+    def _lexical_scores(question: str, chunks: list[dict[str, Any]]) -> list[float]:
         corpus = [question, *[item["text"] for item in chunks]]
-        try:
-            matrix = TfidfVectorizer(max_features=512, stop_words="english").fit_transform(corpus)
-            return cosine_similarity(matrix[0:1], matrix[1:])[0]
-        except ValueError:
-            return np.zeros(len(chunks))
+        matrix = NLPService._tfidf_matrix(corpus, max_features=512)
+        if not matrix:
+            return [0.0 for _ in chunks]
+        query = matrix[0]
+        return [NLPService._cosine(query, chunk) for chunk in matrix[1:]]
 
     @staticmethod
     def keywords(text: str, limit: int = 15) -> list[dict[str, Any]]:
@@ -176,7 +261,7 @@ class NLPService:
             for value in ENTITY_PATTERN.findall(text)
             if value.lower() not in STOP_WORDS and len(value) > 2
         ]
-        return [{"text": text, "count": count} for text, count in Counter(values).most_common(limit)]
+        return [{"text": t, "count": c} for t, c in Counter(values).most_common(limit)]
 
     @staticmethod
     def sentiment(text: str) -> dict[str, Any]:
@@ -206,8 +291,8 @@ class NLPService:
             "chunk_count": len(chunks),
             "word_count": len(TOKEN_PATTERN.findall(text)),
             "chunks": [
-                {"index": index, "text": chunk, "embedding": embeddings.vectors[index]}
-                for index, chunk in enumerate(chunks)
+                {"index": i, "text": chunk, "embedding": embeddings.vectors[i]}
+                for i, chunk in enumerate(chunks)
             ],
             "keywords": keyword_data,
             "entities": entity_data,
@@ -224,14 +309,14 @@ class NLPService:
         keyword_weights = {item["term"]: item["count"] for item in keywords}
         sentences = re.split(r"(?<=[.!?])\s+", " ".join(chunks))
         scored: list[tuple[float, int, str]] = []
-        for index, sentence in enumerate(sentences):
+        for idx, sentence in enumerate(sentences):
             tokens = [token.lower() for token in TOKEN_PATTERN.findall(sentence)]
             if not 5 <= len(tokens) <= 80:
                 continue
             score = sum(keyword_weights.get(token, 0) for token in tokens) / math.sqrt(len(tokens))
-            scored.append((score, index, sentence.strip()))
-        selected = sorted(sorted(scored, reverse=True)[:sentence_limit], key=lambda item: item[1])
-        return " ".join(item[2] for item in selected) or chunks[0][:600]
+            scored.append((score, idx, sentence.strip()))
+        selected = sorted(sorted(scored, reverse=True)[:sentence_limit], key=lambda x: x[1])
+        return " ".join(x[2] for x in selected) or chunks[0][:600]
 
     def retrieve(
         self, question: str, document_analyses: list[dict[str, Any]], top_k: int = 5
@@ -253,29 +338,41 @@ class NLPService:
             for chunk in all_chunks
             if chunk.get("embedding")
         }
-        if backends == {"tensorflow-transformer"} and len(dimensions) == 1:
-            query_result = self.embed([question])
-            query = query_result.vectors[0]
-            if (
-                query_result.backend == "tensorflow-transformer"
-                and len(query) in dimensions
-            ):
-                scores = cosine_similarity(
-                    np.asarray([query]), np.asarray([item["embedding"] for item in all_chunks])
-                )[0]
-            else:
+
+        # BUG FIX: Only attempt dense retrieval when embeddings are consistent
+        # and actually came from the transformer (not tfidf-fallback with variable dims)
+        use_dense = (
+            backends == {"tensorflow-transformer"}
+            and len(dimensions) == 1
+            and 0 not in dimensions
+        )
+
+        if use_dense:
+            try:
+                query_result = self.embed([question])
+                query = query_result.vectors[0]
+                dim = next(iter(dimensions))
+                if query_result.backend == "tensorflow-transformer" and len(query) == dim:
+                    scores = [
+                        self._cosine(query, item["embedding"])
+                        for item in all_chunks
+                    ]
+                else:
+                    scores = self._lexical_scores(question, all_chunks)
+            except Exception:
                 scores = self._lexical_scores(question, all_chunks)
         else:
             scores = self._lexical_scores(question, all_chunks)
-        ranked = np.argsort(scores)[::-1][:top_k]
+
+        ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
         return [
             {
-                "text": all_chunks[index]["text"],
-                "score": round(float(scores[index]), 4),
-                "chunk_index": all_chunks[index].get("index"),
+                "text": all_chunks[i]["text"],
+                "score": round(float(scores[i]), 4),
+                "chunk_index": all_chunks[i].get("index"),
             }
-            for index in ranked
-            if scores[index] > 0
+            for i in ranked
+            if scores[i] > 0
         ]
 
 

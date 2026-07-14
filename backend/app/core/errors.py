@@ -2,7 +2,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 
 
 class AppError(Exception):
@@ -19,19 +19,19 @@ def error_payload(detail: str, code: str, **extra: Any) -> dict[str, Any]:
 
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
-    async def app_error_handler(_: Request, exc: AppError) -> ORJSONResponse:
-        return ORJSONResponse(
+    async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
+        return JSONResponse(
             status_code=exc.status_code,
             content=error_payload(exc.detail, exc.code),
         )
 
     @app.exception_handler(HTTPException)
-    async def http_error_handler(_: Request, exc: HTTPException) -> ORJSONResponse:
+    async def http_error_handler(_: Request, exc: HTTPException) -> JSONResponse:
         detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
         extra: dict[str, Any] = {}
         if exc.status_code == 429 and exc.headers and exc.headers.get("Retry-After"):
             extra["retry_after"] = int(exc.headers["Retry-After"])
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=exc.status_code,
             content=error_payload(
                 detail,
@@ -44,8 +44,8 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
         _: Request, exc: RequestValidationError
-    ) -> ORJSONResponse:
-        return ORJSONResponse(
+    ) -> JSONResponse:
+        return JSONResponse(
             status_code=422,
             content=error_payload(
                 "The request contains invalid data.",

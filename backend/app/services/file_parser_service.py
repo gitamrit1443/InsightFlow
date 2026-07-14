@@ -1,11 +1,12 @@
 import asyncio
+import csv
+import datetime as dt
 import json
 import math
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-import numpy as np
 from pypdf import PdfReader
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,101 +18,164 @@ from app.utils.text_utils import data_preview, truncate_text
 def _safe_json_value(value: Any) -> Any:
     if value is None or (isinstance(value, float) and not math.isfinite(value)):
         return None
-    if isinstance(value, (np.integer,)):
-        return int(value)
-    if isinstance(value, (np.floating,)):
-        return float(value) if math.isfinite(float(value)) else None
-    if isinstance(value, pd.Timestamp):
+    if isinstance(value, (dt.date, dt.datetime)):
         return value.isoformat()
     return value
 
 
-def _tabular_profile(frame: pd.DataFrame) -> dict[str, Any]:
+def _to_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _to_month(value: Any) -> str | None:
+    if isinstance(value, dt.datetime):
+        return value.strftime("%Y-%m")
+    if isinstance(value, dt.date):
+        return value.strftime("%Y-%m")
+    if value is None:
+        return None
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d", "%Y-%m"):
+        try:
+            return dt.datetime.strptime(text[:10], fmt).strftime("%Y-%m")
+        except ValueError:
+            continue
+    return None
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def _quantile(values: list[float], q: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    position = (len(ordered) - 1) * q
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[int(position)]
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def _correlation(first: list[float], second: list[float]) -> float | None:
+    if len(first) < 2 or len(second) < 2 or len(first) != len(second):
+        return None
+    first_mean = sum(first) / len(first)
+    second_mean = sum(second) / len(second)
+    numerator = sum((a - first_mean) * (b - second_mean) for a, b in zip(first, second))
+    first_denominator = math.sqrt(sum((a - first_mean) ** 2 for a in first))
+    second_denominator = math.sqrt(sum((b - second_mean) ** 2 for b in second))
+    denominator = first_denominator * second_denominator
+    return numerator / denominator if denominator else None
+
+
+def _tabular_profile(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, Any]:
     missing = {
-        str(column): int(count)
-        for column, count in frame.isna().sum().items()
-        if int(count) > 0
+        column: count
+        for column in columns
+        if (count := sum(1 for row in rows if row.get(column) in (None, ""))) > 0
     }
-    numeric_columns = list(frame.select_dtypes(include="number").columns[:12])
+    numeric_values: dict[str, list[float]] = {}
+    for column in columns:
+        values = [_to_float(row.get(column)) for row in rows if row.get(column) not in (None, "")]
+        numbers = [value for value in values if value is not None]
+        if numbers and len(numbers) >= max(1, int(len(values) * 0.8)):
+            numeric_values[column] = numbers
+    numeric_columns = list(numeric_values.keys())[:12]
+
     numeric_profiles: list[dict[str, Any]] = []
     anomalies: list[dict[str, Any]] = []
     for column in numeric_columns:
-        series = pd.to_numeric(frame[column], errors="coerce").dropna()
-        if series.empty:
+        series = numeric_values[column]
+        if not series:
             continue
-        q1, q3 = series.quantile([0.25, 0.75])
+        q1, q3 = _quantile(series, 0.25), _quantile(series, 0.75)
         iqr = q3 - q1
         lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        outliers = series[(series < lower) | (series > upper)]
+        outliers = [value for value in series if value < lower or value > upper]
         numeric_profiles.append(
             {
-                "column": str(column),
-                "count": int(series.count()),
-                "mean": round(float(series.mean()), 4),
-                "median": round(float(series.median()), 4),
-                "min": round(float(series.min()), 4),
-                "max": round(float(series.max()), 4),
-                "sum": round(float(series.sum()), 4),
+                "column": column,
+                "count": len(series),
+                "mean": round(sum(series) / len(series), 4),
+                "median": round(_median(series), 4),
+                "min": round(min(series), 4),
+                "max": round(max(series), 4),
+                "sum": round(sum(series), 4),
             }
         )
-        if len(outliers):
+        if outliers:
             anomalies.append(
                 {
-                    "column": str(column),
-                    "count": int(len(outliers)),
-                    "lower_bound": round(float(lower), 4),
-                    "upper_bound": round(float(upper), 4),
-                    "sample_values": [round(float(value), 4) for value in outliers.head(5)],
+                    "column": column,
+                    "count": len(outliers),
+                    "lower_bound": round(lower, 4),
+                    "upper_bound": round(upper, 4),
+                    "sample_values": [round(value, 4) for value in outliers[:5]],
                 }
             )
 
     categorical_profiles: list[dict[str, Any]] = []
-    categorical_columns = [
-        column for column in frame.columns if column not in numeric_columns
-    ][:10]
+    categorical_columns = [column for column in columns if column not in numeric_columns][:10]
     for column in categorical_columns:
-        counts = frame[column].fillna("Missing").astype(str).value_counts().head(8)
+        counts = Counter(
+            str(row.get(column) if row.get(column) not in (None, "") else "Missing")
+            for row in rows
+        ).most_common(8)
         categorical_profiles.append(
             {
-                "column": str(column),
-                "labels": [str(value) for value in counts.index],
-                "values": [int(value) for value in counts.values],
+                "column": column,
+                "labels": [label for label, _ in counts],
+                "values": [count for _, count in counts],
             }
         )
 
     time_series: list[dict[str, Any]] = []
-    for column in frame.columns:
+    for column in columns:
         if len(time_series) >= 3:
             break
-        if not any(term in str(column).lower() for term in ("date", "time", "month", "year")):
+        if not any(term in column.lower() for term in ("date", "time", "month", "year")):
             continue
-        dates = pd.to_datetime(frame[column], errors="coerce")
-        valid = dates.notna()
-        if valid.sum() < 2:
+        periods = [_to_month(row.get(column)) for row in rows]
+        counts = Counter(period for period in periods if period)
+        if sum(counts.values()) < 2:
             continue
-        grouped = (
-            pd.DataFrame({"period": dates[valid].dt.to_period("M").astype(str)})
-            .value_counts()
-            .sort_index()
-        )
+        grouped = sorted(counts.items())
         time_series.append(
             {
-                "column": str(column),
-                "labels": [index[0] for index in grouped.index],
-                "values": [int(value) for value in grouped.values],
+                "column": column,
+                "labels": [period for period, _ in grouped],
+                "values": [count for _, count in grouped],
                 "metric": "record_count",
             }
         )
 
     correlations: list[dict[str, Any]] = []
     if len(numeric_columns) >= 2:
-        matrix = frame[numeric_columns].corr(numeric_only=True)
         pairs: list[tuple[float, float, str, str]] = []
         for index, first in enumerate(numeric_columns):
             for second in numeric_columns[index + 1 :]:
-                value = matrix.loc[first, second]
-                if pd.notna(value):
-                    pairs.append((abs(float(value)), float(value), str(first), str(second)))
+                paired = [
+                    (_to_float(row.get(first)), _to_float(row.get(second)))
+                    for row in rows
+                ]
+                valid = [(a, b) for a, b in paired if a is not None and b is not None]
+                value = _correlation([a for a, _ in valid], [b for _, b in valid])
+                if value is not None:
+                    pairs.append((abs(value), value, first, second))
         correlations = [
             {"first": first, "second": second, "coefficient": round(value, 4)}
             for _, value, first, second in sorted(pairs, reverse=True)[:8]
@@ -128,18 +192,35 @@ def _tabular_profile(frame: pd.DataFrame) -> dict[str, Any]:
 
 
 def _parse_tabular(path: Path, file_type: str) -> tuple[str, dict[str, Any]]:
-    frame = pd.read_csv(path) if file_type == "csv" else pd.read_excel(path)
-    preview_frame = frame.head(100).astype(object).where(pd.notnull(frame.head(100)), None)
-    preview = [
-        {str(key): _safe_json_value(value) for key, value in row.items()}
-        for row in preview_frame.to_dict(orient="records")
-    ]
+    if file_type == "csv":
+        with path.open("r", encoding="utf-8-sig", newline="", errors="replace") as handle:
+            reader = csv.DictReader(handle)
+            columns = [str(column) for column in (reader.fieldnames or [])]
+            rows = [{str(key): _safe_json_value(value) for key, value in row.items()} for row in reader]
+    else:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        sheet = workbook.active
+        raw_rows = sheet.iter_rows(values_only=True)
+        headers = next(raw_rows, ())
+        columns = [str(value) if value is not None else f"Column {index}" for index, value in enumerate(headers, start=1)]
+        rows = [
+            {
+                columns[index]: _safe_json_value(value)
+                for index, value in enumerate(row[: len(columns)])
+            }
+            for row in raw_rows
+        ]
+        workbook.close()
+
+    preview = rows[:100]
     parsed = {
-        "columns": [str(column) for column in frame.columns],
-        "row_count": int(len(frame)),
-        "column_count": int(len(frame.columns)),
+        "columns": columns,
+        "row_count": len(rows),
+        "column_count": len(columns),
         "preview": preview,
-        "analytics": _tabular_profile(frame),
+        "analytics": _tabular_profile(rows, columns),
     }
     lines = [
         f"Dataset contains {parsed['row_count']} records and {parsed['column_count']} columns.",

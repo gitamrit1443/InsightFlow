@@ -1,3 +1,4 @@
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -45,6 +46,13 @@ class Settings(BaseSettings):
     @classmethod
     def parse_origins(cls, value: object) -> object:
         if isinstance(value, str):
+            if value.strip().startswith("["):
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, list):
+                        return [str(origin).strip() for origin in parsed if str(origin).strip()]
+                except json.JSONDecodeError:
+                    pass
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
