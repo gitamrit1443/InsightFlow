@@ -187,7 +187,7 @@ InsightFlow/
 **Amrit Pal Singh**
 Full Stack Developer | Angular & FastAPI
 
-- Portfolio: [amritcode.com](https://amritcode.com)
+- Portfolio: [amritcode](https://amritpalsingh-portfolio.netlify.app)
 - GitHub: [@gitamrit1443](https://github.com/gitamrit1443)
 
 ---
