@@ -56,6 +56,7 @@
           "configurations": {
             "production": {
               "buildTarget": "insightflow:build:production"
+              
             },
             "development": {
               "buildTarget": "insightflow:build:development"
