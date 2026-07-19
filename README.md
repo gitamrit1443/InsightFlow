@@ -77,12 +77,12 @@ InsightFlow lets teams upload project documents (PDFs, spreadsheets, reports) an
 
 | | |
 |---|---|
-| **Home — Workspace Overview** <br> ![Home](public/Data/Screenshot%202026-07-15%20005529.png) | **Projects** <br> ![Projects](public/Data/Screenshot%202026-07-15%20005611.png) |
-| **Upload Data** <br> ![Upload](public/Data/Screenshot%202026-07-15%20005701.png) | ![Screen](public/Data/Screenshot%202026-07-19%20204307.png) |
-| ![Screen](public/Data/Screenshot%202026-07-19%20204401.png) | ![Screen](public/Data/Screenshot%202026-07-19%20204439.png) |
-| ![Screen](public/Data/Screenshot%202026-07-19%20204503.png) | ![Screen](public/Data/Screenshot%202026-07-19%20204532.png) |
-| ![Screen](public/Data/Screenshot%202026-07-19%20204617.png) | ![Screen](public/Data/Screenshot%202026-07-19%20204643.png) |
-| ![Screen](public/Data/Screenshot%202026-07-19%20204706.png) | ![Screen](public/Data/Screenshot%202026-07-19%20204728.png) |
+| **Home — Workspace Overview** <br> ![Home](frontend/public/Data/Screenshot%202026-07-15%20005529.png) | **Projects** <br> ![Projects](frontend/public/Data/Screenshot%202026-07-15%20005611.png) |
+| **Upload Data** <br> ![Upload](frontend/public/Data/Screenshot%202026-07-15%20005701.png) | ![Screen](frontend/public/Data/Screenshot%202026-07-19%20204307.png) |
+| ![Screen](frontend/public/Data/Screenshot%202026-07-19%20204401.png) | ![Screen](frontend/public/Data/Screenshot%202026-07-19%20204439.png) |
+| ![Screen](frontend/public/Data/Screenshot%202026-07-19%20204503.png) | ![Screen](frontend/public/Data/Screenshot%202026-07-19%20204532.png) |
+| ![Screen](frontend/public/Data/Screenshot%202026-07-19%20204617.png) | ![Screen](frontend/public/Data/Screenshot%202026-07-19%20204643.png) |
+| ![Screen](frontend/public/Data/Screenshot%202026-07-19%20204706.png) | ![Screen](frontend/public/Data/Screenshot%202026-07-19%20204728.png) |
 
 ---
 
