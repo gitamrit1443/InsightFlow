@@ -1,0 +1,37 @@
+# Environment and editor settings
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.vs/
+
+# Python virtual environments, caches, and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+backend/venv/
+backend/.venv/
+
+# Local application data and runtime output
+*.db
+*.sqlite
+*.sqlite3
+*.log
+backend/uploads/
+backend/model-cache/
+backend/.agents/
+backend/.codex/
+
+# Frontend dependencies and generated builds
+frontend/node_modules/
+frontend/dist/
+frontend/.angular/
+
+# Exported archives and operating-system clutter
+*.zip
+.DS_Store
+Thumbs.db
